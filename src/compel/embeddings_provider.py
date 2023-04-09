@@ -104,66 +104,8 @@ class EmbeddingsProvider:
             tokens, per_token_weights, mask = self.get_token_ids_and_expand_weights(fragments, weights, device=device)
             base_embedding = self.build_weighted_embedding_tensor(tokens, per_token_weights, mask)
 
-            # this is our starting point
-            embeddings = base_embedding.unsqueeze(0)
-            per_embedding_weights = [1.0]
-
-            # now handle weights <1
-            # Do this by building extra embeddings tensors that lack the words being <1 weighted. These will be lerped
-            # with the embeddings tensors that have the words, such that if the weight of a word is 0.5, the resulting
-            # embedding will be exactly half-way between the unweighted prompt and the prompt with the <1 weighted words
-            # removed.
-            # e.g. for "mountain:1 man:0.5", intuitively the "man" should be "half-gone". therefore, append an embedding
-            # for "mountain" (i.e. without "man") to the already-produced embedding for "mountain man", and weight it
-            # such that the resulting lerped embedding is exactly half-way between "mountain man" and "mountain".
-            fragment_token_index_ranges = self._get_token_ranges_for_fragments(tokens.tolist(), fragments)
-
-            for index, fragment_weight in enumerate(weights):
-                if fragment_weight < 1:
-                    if self.downweight_mode == DownweightMode.MASK:
-                        fragment_start_token_id, fragment_end_token_id = fragment_token_index_ranges[index]
-                        # mask out this fragment
-                        mask_without_fragment = mask.clone()
-                        mask_without_fragment[fragment_start_token_id:fragment_end_token_id+1] = 0
-                        if not self.truncate_to_model_max_length:
-                            # but don't mask chunk-delimiting eos/bos markers
-                            mask_without_fragment[0::self.tokenizer.model_max_length] = 1
-                            mask_without_fragment[self.tokenizer.model_max_length-1::self.tokenizer.model_max_length] = 1
-                        embedding_without_this = self.build_weighted_embedding_tensor(tokens, per_token_weights, mask_without_fragment)
-                    else:
-                        fragments_without_this = fragments[0:index] + fragments[index+1:]
-                        weights_without_this = weights[0:index] + weights[index+1:]
-                        tokens_without_fragment, per_token_weights_without_fragment, mask_without_fragment = \
-                            self.get_token_ids_and_expand_weights(fragments_without_this, weights_without_this, device=device)
-                        embedding_without_this = self.build_weighted_embedding_tensor(tokens_without_fragment,
-                                                                                      per_token_weights_without_fragment,
-                                                                                      mask_without_fragment)
-
-                    embeddings = torch.cat((embeddings, embedding_without_this.unsqueeze(0)), dim=1)
-                    # weight of the embedding *without* this fragment gets *stronger* as its weight approaches 0
-                    # if fragment_weight = 0, basically we want embedding_without_this to completely overwhelm base_embedding
-                    # therefore:
-                    # fragment_weight = 1: we are at base_z => lerp weight 0
-                    # fragment_weight = 0.5: we are halfway between base_z and here => lerp weight 1
-                    # fragment_weight = 0: we're now entirely overriding base_z ==> lerp weight inf
-                    # so let's use tan(), because:
-                    # tan is 0.0 at 0,
-                    #        1.0 at PI/4, and
-                    #        inf at PI/2
-                    # -> tan((1-weight)*PI/2) should give us ideal lerp weights
-                    epsilon = 1e-5
-                    fragment_weight = max(epsilon, fragment_weight) # inf is bad
-                    embedding_lerp_weight = math.tan((1.0 - fragment_weight) * math.pi / 2)
-                    # todo handle negative weight?
-
-                    per_embedding_weights.append(embedding_lerp_weight)
-
-            lerped_embeddings = self.apply_embedding_weights(embeddings, per_embedding_weights, normalize=True).squeeze(0)
-
-            #print(f"assembled tokens for '{fragments}' into tensor of shape {lerped_embeddings.shape}")
-
             # append to batch
-            batch_z = lerped_embeddings.unsqueeze(0) if batch_z is None else torch.cat([batch_z, lerped_embeddings.unsqueeze(0)], dim=1)
+            batch_z = base_embedding.unsqueeze(0) if batch_z is None else torch.cat([batch_z, base_embedding.unsqueeze(0)], dim=1)
             batch_tokens = tokens.unsqueeze(0) if batch_tokens is None else torch.cat([batch_tokens, tokens.unsqueeze(0)], dim=1)
 
         # should have shape (B, 77, 768)
@@ -333,13 +275,27 @@ class EmbeddingsProvider:
             batch_weights_expanded = chunk_per_token_weights.reshape(
                 chunk_per_token_weights.shape + (1,)).expand(z.shape).to(z)
 
-            z_delta_from_empty = z - empty_z
-            this_weighted_z = empty_z + (z_delta_from_empty * batch_weights_expanded)
+            # https://github.com/huggingface/diffusers/issues/2431#issuecomment-1500607152
+            # disable lerps against an embedding produced from the empty string
+            # z_delta_from_empty = z - empty_z
+            # this_weighted_z = empty_z + (z_delta_from_empty * batch_weights_expanded)
+            # weighted_z = (
+            #     this_weighted_z
+            #     if weighted_z is None
+            #     else torch.cat([weighted_z, this_weighted_z], dim=1)
+            # )
+            
+            # from A1111: restoring original mean is likely not correct, but it seems to work well to prevent artifacts that happen otherwise
+            original_mean = z.mean()
+            z = z * batch_weights_expanded
+            new_mean = z.mean()
+            z = z * (original_mean / new_mean)
             weighted_z = (
-                this_weighted_z
+                z
                 if weighted_z is None
-                else torch.cat([weighted_z, this_weighted_z], dim=1)
+                else torch.cat([weighted_z, z], dim=1)
             )
+
             chunk_start_index += chunk_size
 
         return weighted_z
