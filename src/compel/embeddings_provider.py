@@ -107,7 +107,7 @@ class EmbeddingsProvider:
             # append to batch
             batch_z = base_embedding.unsqueeze(0) if batch_z is None else torch.cat([batch_z, base_embedding.unsqueeze(0)], dim=1)
             batch_tokens = tokens.unsqueeze(0) if batch_tokens is None else torch.cat([batch_tokens, tokens.unsqueeze(0)], dim=1)
-
+        print("batch_z shape: ", batch_z.shape)
         # should have shape (B, 77, 768)
         #print(f"assembled all tokens into tensor of shape {batch_z.shape}")
 
