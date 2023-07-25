@@ -63,6 +63,17 @@ class PromptParserTestCase(unittest.TestCase):
         self.assertEqual(make_weighted_conjunction([('pretty flowers', 1.1), (', the flames are too hot', 1)]),
                          parse_prompt("(pretty flowers)+, the flames are too hot"))
 
+
+    def test_wayward_periods(self):
+        self.assertEqual(
+            make_weighted_conjunction([('a text .', 0.7), ('.', 1.0), ('a second text .', 0.8)]),
+            parse_prompt("(a text.)0.7. (a second text.)0.8"))
+
+        self.assertEqual(
+            make_weighted_conjunction([('a text .', 0.7), ('.', 1.0), ('a second text .', 0.8)]),
+            parse_prompt("\"a text.\"0.7. \"a second text.\"0.8"))
+
+
     def test_no_parens_attention_runon(self):
         self.assertEqual(make_weighted_conjunction([('fire', 1.0), ('flames', pow(1.1, 2))]), parse_prompt("fire flames++"))
         self.assertEqual(make_weighted_conjunction([('fire', 1.0), ('flames', pow(0.9, 2))]), parse_prompt("fire flames--"))
@@ -600,9 +611,17 @@ class PromptParserTestCase(unittest.TestCase):
 
 
     def test_bad_auto1111_syntax(self):
-        self.assertEqual(Conjunction([FlattenedPrompt([("happy camper:0.3", 1.0)])]),
+        self.assertEqual(Conjunction([FlattenedPrompt([("happy camper:0 . 3", 1.0)])]),
                          parse_prompt("(happy camper:0.3)"))
 
+    def test_numbers_to_floats(self):
+        self.assertEqual(Conjunction([FlattenedPrompt([("test1 , 1test , test1test", 1.0)])]),
+                        parse_prompt("(test1, 1test, test1test)"))
+
+
+    def test_commas_and_whitespace(self):
+        self.assertEqual(Conjunction([FlattenedPrompt([("middle age,", 1.0), ("fantasy", pow(1.1, 2)), ("style", 1)])]),
+                         parse_prompt("middle age,fantasy++ style"))
 
 if __name__ == '__main__':
     unittest.main()

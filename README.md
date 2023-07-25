@@ -1,11 +1,11 @@
 # Compel
 A text prompt weighting and blending library for transformers-type text embedding systems, by [@damian0815](https://github.com/damian0815).
 
-With a flexible and intuitive syntax, you can re-weight different parts of a prompt string and thus re-weight the different parts of the embeddning tensor produced from the string.
+With a flexible and intuitive syntax, you can re-weight different parts of a prompt string and thus re-weight the different parts of the embedding tensor produced from the string.
 
 Tested and developed against Hugging Face's `StableDiffusionPipeline` but it should work with any diffusers-based system that uses an `Tokenizer` and a `Text Encoder` of some kind.  
 
-Adapted from the [InvokeAI](https://github.com/invoke-ai) prompting code (also by [@damian0815](https://github.com/damian0815)). For now, the syntax is fully documented [here](Reference.md).
+Adapted from the [InvokeAI](https://github.com/invoke-ai) prompting code (also by [@damian0815](https://github.com/damian0815)).
 
 Note that cross-attention control `.swap()` is currently ignored by Compel, but you can use it by calling `build_conditioning_tensor_for_prompt_object()` yourself, and implementing cross-attention control in your diffusion loop.
 
@@ -13,9 +13,13 @@ Note that cross-attention control `.swap()` is currently ignored by Compel, but 
 
 `pip install compel`
 
+### Documentation
+
+Documentation is [here](doc/).
+
 ### Demo
 
-see [compel-demo.ipynb](compel-demo.ipynb)
+See [compel-demo.ipynb](compel-demo.ipynb)
 
 <a target="_blank" href="https://colab.research.google.com/github/damian0815/compel/blob/main/compel-demo.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
@@ -45,8 +49,6 @@ images[0].save("image.jpg")
 For batched input, use the __call__ interface to compel:
 
 ```python
-import torch
-
 from diffusers import StableDiffusionPipeline
 from compel import Compel
 
@@ -61,7 +63,123 @@ images[0].save("image0.jpg")
 images[1].save("image1.jpg")
 ```
 
+### Textual Inversion support
+
+If you want to have access to 🤗diffusers textual inversions, instantiate a `DiffusersTextualInversionManager` and pass it on Compel init:
+
+```
+pipeline = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5")
+textual_inversion_manager = DiffusersTextualInversionManager(pipeline)
+compel = Compel(tokenizer=pipeline.tokenizer, text_encoder=pipeline.text_encoder, 
+    textual_inversion_manager=textual_inversion_manager)
+```
+
+## Memory usage/VRAM leaks
+
+If you run into memory issues, please make sure you're running compel inside `with torch.no_grad():` blocks. 
+
+If this doesn't help, you could try this advice offered by @kshieh1: 
+> After image generation, you should explictly de-reference the tensor object (i.e., prompt_embeds = None) and call gc.collect()
+
+See https://github.com/damian0815/compel/issues/24 for more details. Thanks @kshieh1 !
+
 ## Changelog
+
+### 2.0.0 - SDXL Support
+
+With big thanks to Patrick von Platen from Hugging Face for [the pull request](https://github.com/damian0815/compel/pull/41), Compel now supports SDXL. Use it like this: 
+
+```
+from compel import Compel, ReturnedEmbeddingsType
+from diffusers import DiffusionPipeline
+pipeline = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-0.9", variant="fp16", use_safetensors=True, torch_dtype=torch.float16).to("cuda")
+compel = Compel(tokenizer=[pipeline.tokenizer, pipeline.tokenizer_2] , text_encoder=[pipeline.text_encoder, pipeline.text_encoder_2], returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, requires_pooled=[False, True])
+# upweight "ball"
+prompt = "a cat playing with a ball++ in the forest"
+conditioning, pooled = compel(prompt)
+# generate image
+image = pipeline(prompt_embeds=conditioning, pooled_prompt_embeds=pooled, num_inference_steps=30).images[0]
+```
+
+Please note that this is a **breaking change** if you've been using clip skip: the old boolean arg `use_penultimate_clip_layer` has been replaced with an enum `ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED`.
+
+
+#### 1.2.1 - actually apply `.and()` weights
+
+### 1.2.0 - Concatenate embeddings using `.and()`
+
+For Stable Diffusion 2.1 I've been experimenting with a new feature: concatenated embeddings. What I noticed, for example, is that for more complex prompts image generation quality becomes wildly better when the prompt is broken into multiple parts and fed to OpenCLIP separately.
+
+TL;DR: you can now experiment with breaking up your prompts into segments, which for SD2.1 appears to improve the generated image. The syntax is `("prompt part 1", "prompt part 2").and()`. You can have more than one part, and you can also weight them, eg `("a man eating an apple", "sitting on the roof of a car", "high quality, trending on artstation, 8K UHD").and(1, 0.5, 0.5)` which will assign weight `1` to `man eating an apple` and `0.5` to `sitting on the roof of a car` and `high quality, trending on artstation, 8K UHD`. 
+
+Here's a nonsense example from the InvokeAI discord #garbage-bin channel, created by gogurt enjoyer's incredible [nightmare prompt generator](https://huggingface.co/cactusfriend/nightmare-invokeai-prompts):
+
+```
+a moist sloppy pindlesackboy sloppy hamblin' bogomadong, Clem Fandango is pissed-off, Wario's Woods in background, making a noise like ga-woink-a
+```
+
+Plugging this straight into SD2.1 we get this, which is really not a good image:
+![](images/000075.6dfd7adf.466129594.png)
+
+However, if the prompt is broken up into chunks and fed into OpenCLIP separately as four separate prompts, and then concatenated:
+
+```
+a moist sloppy pindlesackboy sloppy hamblin' bogomadong
+
+Clem Fandango is pissed-off
+
+Wario's Woods in background
+
+making a noise like ga-woink-a
+```
+
+then output image with the same seed is *so much* better:
+![](images/000076.68b1c320.466129594.png)
+
+In the new `.and()` syntax you would prompt this as follows:
+```
+("a moist sloppy pindlesackboy sloppy hamblin' bogomadong", "Clem Fandango is pissed-off", "Wario's Woods in background", "making a noise like ga-woink-a").and()
+```
+
+The effect can be more or less subtle. Here for example is 
+```
+A dream of a distant galaxy, by Caspar David Friedrich, matte painting, trending on artstation, HQ
+```
+![](images/000129.1b33b559.2793529321.png)
+
+And the same split into two parts:
+```
+A dream of a distant galaxy, by Caspar David Friedrich, matte painting
+
+trending on artstation, HQ
+```
+![](images/000128.b5d5cd62.2793529321.png)
+
+The Compel prompt for this is: 
+```
+("A dream of a distant galaxy, by Caspar David Friedrich, matte painting", "trending on artstation, HQ").and()
+```
+
+
+
+
+#### 1.1.6 - misc small fixes
+- add `DiffusersTextualInversionManager` (thanks @pdoane)
+- fix batch embedding generation with truncated/non-truncated prompt lengths (#18, thanks @abassino)
+- add note about memory leakage (ref #24, thanks @kshieh1) 
+- fix incorrect parsing when commas are not followed by whitespace (#34, thanks @moono)
+
+#### 1.1.5 - fix for compel turning numbers into floats for text inside parentheses
+
+#### 1.1.4 - fixes for #23 (sequential offload) and InvokeAI issue #3442 (allow hyphens in LoRA names) 
+
+#### 1.1.3 - enable fetching the penultimate CLIP hidden layer (aka "clip skip")
+
+To use, pass `use_penultimate_clip_layer=True` when initializing your `Compel` instance. Note that there's no need to pass this flag for SD2.0/SD2.1 because diffusers already throws away the last hidden layer when loading the SD2.0+ text encoder.
+
+#### 1.1.2 - fix for #21 (crash when parsing long prompts with truncation enabled if there is weighted fragments beyond the truncation boundary)
+
+#### 1.1.1 - fix for #22 (issues parsing `.` characters inside parentheses)
 
 #### 1.1.0 - support for parsing `withLora`/`useLora` on `parse_prompt_string()`.
 
